@@ -1,44 +1,71 @@
-# tutorial_full.py
-# -------------------
-# Beginner Tutorial: FastAPI AI-to-SQL Agent (Vertical AI)
-# One-file demonstration: AI prompt handling, FastAPI setup, OpenAI integration.
-# Style aligned with DataCamp's FastAPI course structure.
-
 import os
 import sys
-from dotenv import load_dotenv
-from typing import Optional
-
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-
-from databases import Database
-from sqlalchemy import create_engine, MetaData
-from openai import OpenAI
+import openai
 import uvicorn
+from typing import Optional
+from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.security import OAuth2PasswordRequestForm
+from databases import Database
+from sqlalchemy import Table, Column, Integer, String, MetaData, create_engine
+from passlib.context import CryptContext
+from dotenv import load_dotenv
+from contextlib import asynccontextmanager
 
 # --------------------
-# Section 1: Setup & Config
+# Environment Setup
 # --------------------
-# Load environment variables and connect to OpenAI and Postgres
-
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
+
 if not OPENAI_API_KEY or not DATABASE_URL:
-    print("Missing OPENAI_API_KEY or DATABASE_URL in env.")
+    print("❌ Missing OPENAI_API_KEY or DATABASE_URL in env.")
     sys.exit(1)
 
-openai_client = OpenAI()
+openai.api_key = OPENAI_API_KEY
+
+# --------------------
+# Database Setup
+# --------------------
 db = Database(DATABASE_URL)
 metadata = MetaData()
 engine = create_engine(DATABASE_URL)
 
-# --------------------
-# Section 2: Data Models
-# --------------------
-# These Pydantic models define what the API expects and returns
+# Users table
+users = Table(
+    "users",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("username", String(50), unique=True, nullable=False),
+    Column("hashed_password", String(255), nullable=False),
+)
 
+# --------------------
+# Auth Helpers
+# --------------------
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+def hash_password(password):
+    return pwd_context.hash(password)
+
+# --------------------
+# FastAPI App
+# --------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await db.connect()
+    yield
+    await db.disconnect()
+
+app = FastAPI(title="AI-to-SQL Agent", lifespan=lifespan)
+
+# --------------------
+# Pydantic Models
+# --------------------
 class QueryRequest(BaseModel):
     question: str
 
@@ -51,25 +78,19 @@ class ExecuteResponse(BaseModel):
     rows: list
 
 # --------------------
-# Section 3: FastAPI App Lifecycle
+# Login Endpoint
 # --------------------
-# FastAPI lifecycle events for connecting/disconnecting from the database
-
-app = FastAPI(title="AI-to-SQL Agent")
-
-@app.on_event("startup")
-async def on_start():
-    await db.connect()
-
-@app.on_event("shutdown")
-async def on_stop():
-    await db.disconnect()
+@app.post("/login")
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    query = users.select().where(users.c.username == form_data.username)
+    user = await db.fetch_one(query)
+    if not user or not verify_password(form_data.password, user["hashed_password"]):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    return {"message": "Login successful", "username": user["username"]}
 
 # --------------------
-# Section 4: Helpers
+# SQL Generation Helpers
 # --------------------
-# Utility functions for schema detection and prompt generation
-
 async def detect_table(question: str) -> str:
     rows = await db.fetch_all("""
         SELECT table_name FROM information_schema.tables
@@ -97,7 +118,7 @@ def generate_sql(question: str, schema: dict) -> str:
     {question}
     Produce ONLY the SQL query, no explanation.
     """
-    response = openai_client.chat.completions.create(
+    response = openai.ChatCompletion.create(
         model="gpt-4o",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.0,
@@ -106,10 +127,8 @@ def generate_sql(question: str, schema: dict) -> str:
     return response.choices[0].message.content.strip().replace("```sql", "").replace("```", "").strip()
 
 # --------------------
-# Section 5: API Endpoints
+# SQL Endpoints
 # --------------------
-# These endpoints generate and optionally execute SQL from natural language
-
 @app.post("/generate-sql", response_model=QueryResponse)
 async def generate_sql_route(payload: QueryRequest):
     try:
@@ -132,9 +151,7 @@ async def execute_sql_route(payload: QueryRequest):
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
 
 # --------------------
-# Section 6: Run the App
+# App Runner
 # --------------------
-# Use uvicorn to launch the server. Use --reload for dev mode.
-
 if __name__ == "__main__":
     uvicorn.run("tutorial_full:app", host="127.0.0.1", port=8000, reload=True)

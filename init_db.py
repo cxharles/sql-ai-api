@@ -7,6 +7,30 @@ from sqlalchemy import (
     create_engine
 )
 from databases import Database
+from sqlalchemy import Table, Column, Integer, String
+
+
+# ✅ Define shared metadata object first
+metadata = MetaData()
+
+# ✅ Now use metadata for both tables
+users = Table(
+    "users",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("username", String(50), unique=True, nullable=False),
+    Column("hashed_password", String(255), nullable=False),
+)
+
+customers = Table(
+    "customers",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("name", String(100), nullable=False),
+    Column("revenue", Numeric(10, 2), nullable=False),
+    Column("signup_date", Date, nullable=False),
+)
+
 
 # Load environment variables from .env file
 load_dotenv()
